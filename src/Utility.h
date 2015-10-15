@@ -19,7 +19,6 @@
 #include <set>
 #include <memory>
 #include <tr1/unordered_map>
-//#include <unordered_map>
 #include <queue>
 #include <cmath>
 #include <algorithm>
@@ -31,12 +30,13 @@
 #include <condition_variable>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 
 #ifdef USEMULTITHREAD
 #include <omp.h>
 #endif
 
-#include "vectors.h"
+//#include "vectors.h"
 
 using namespace std;
 
@@ -60,27 +60,27 @@ const string TAB = "    ";
 const unsigned MAXUNSIGNED = 2 << 30;
 
 ///Returns a random number uniformly distributed between 0 and 1
-inline double random01() {
-	return (double) rand() / (double) RAND_MAX;
-}
-
-///Returns a random number approximately normally distributed with mean 0 and std 1
-inline double randomn() {
-	return  -log(1 / random01() - 1) / 1.702; //Rao, K. R., Boiroju, N. K., & Reddy, M. K. (2011). GENERATION OF STANDARD NORMAL RANDOM VARIABLES. Indian Journal of Scientific Research, 2(4).
-}
-
-///Returns a random integer uniformly distributed between 0 and the argument aMax-1
-inline unsigned randomUnsigned(unsigned aMax) {
-	return (unsigned) (rand() % aMax);
-}
-
-template<class InType>
-void PermuteVector(vector<InType> & t) {
-	for (unsigned i = 0; i < t.size(); ++i) {
-		unsigned j = randomUnsigned(t.size());
-		swap(t[i], t[j]);
-	}
-}
+//inline double random01() {
+//	return (double) rand() / (double) RAND_MAX;
+//}
+//
+/////Returns a random number approximately normally distributed with mean 0 and std 1
+//inline double randomn() {
+//	return  -log(1 / random01() - 1) / 1.702; //Rao, K. R., Boiroju, N. K., & Reddy, M. K. (2011). GENERATION OF STANDARD NORMAL RANDOM VARIABLES. Indian Journal of Scientific Research, 2(4).
+//}
+//
+/////Returns a random integer uniformly distributed between 0 and the argument aMax-1
+//inline unsigned randomUnsigned(unsigned aMax) {
+//	return (unsigned) (rand() % aMax);
+//}
+//
+//template<class InType>
+//void PermuteVector(vector<InType> & t) {
+//	for (unsigned i = 0; i < t.size(); ++i) {
+//		unsigned j = randomUnsigned(t.size());
+//		swap(t[i], t[j]);
+//	}
+//}
 
 ///Implements a type converter via streams
 template<class OutType, class InType>
@@ -92,9 +92,9 @@ OutType stream_cast(const InType & t) {
 	return result;
 }
 
-void MakeShuffledDataIndicesList(vector<unsigned>& oDataIdList, unsigned aSize);
+//void MakeShuffledDataIndicesList(vector<unsigned>& oDataIdList, unsigned aSize);
 
-///Return an integer hash value for a given input integer in a given domain range
+//Return an integer hash value for a given input integer in a given domain range
 inline int IntHashSimple(int key, int aModulo) {
 	key = ~key + (key << 15); // key = (key << 15) - key - 1;
 	key = key ^ (key >> 12);
@@ -105,43 +105,54 @@ inline int IntHashSimple(int key, int aModulo) {
 	return key % aModulo;
 }
 
-inline int IntHashPair(int key1, int key2, int aModulo = 2147483647) {
-	const double A = sqrt(2) - 1;
-	int key = key1 * (key2 + 1) * A;
-	return IntHashSimple(key, aModulo);
-}
+//inline int IntHashPair(int key1, int key2, int aModulo = 2147483647) {
+//	const double A = sqrt(2) - 1;
+//	int key = key1 * (key2 + 1) * A;
+//	return IntHashSimple(key, aModulo);
+//}
 
-///Return an integer hash value for a given input integer in a given domain range given an additional seed to select the random hash function
+//Return an integer hash value for a given input integer in a given domain range given an additional seed to select the random hash function
 inline int IntHash(int key, int aModulo, unsigned aSeed) {
 	const double A = sqrt(2) - 1;
 	return IntHashSimple(key * (aSeed + 1) * A, aModulo);
 }
 
-unsigned RSHash(const string& str);
-unsigned RSHash(const vector<unsigned>& aV);
-unsigned APHash(const string& str);
-unsigned APHash(const vector<unsigned>& aV);
-unsigned HashFunc(const string& str, unsigned aBitMask = 2147483647);
-unsigned HashFunc(const vector<unsigned>& aList, unsigned aBitMask = 2147483647);
+//unsigned RSHash(const string& str);
+//unsigned RSHash(const vector<unsigned>& aV);
+//unsigned APHash(const string& str);
+//unsigned APHash(const vector<unsigned>& aV);
+//unsigned APHash(const vector<unsigned>::const_iterator& aV_begin, vector<unsigned>::const_iterator& aV_end);
+//unsigned HashFunc(const string& str, unsigned aBitMask = 2147483647);
+//unsigned HashFunc(const vector<unsigned>& aList, unsigned aBitMask = 2147483647)
 
-//inline vector<unsigned> ComputeMinHashSignature(SVector& aX, unsigned aNumHashFunctions) {
-//	const unsigned MAXUNSIGNED = 2147483647;
-//	//prepare a vector containing the k min values
-//	vector<unsigned> signature(aNumHashFunctions, MAXUNSIGNED);
-//	for (SparseVector<double>::InnerIterator it(aX); it; ++it) {
-//		//extract only the feature id (i.e. ignore the actual feature value)
-//		unsigned hash_id = it.index();
-//		if (hash_id == 0) {
-//			hash_id = 1; //force collision between feature 0 and 1 to avoid features with ID=0
-//		}
-//		for (unsigned k = 0; k < aNumHashFunctions; ++k) { //for all k hashes
-//			unsigned new_hash = IntHash(hash_id, MAXUNSIGNED, k); //rehash the feature id with a procedure that is aware of the index k
-//			if (new_hash < signature[k])
-//				signature[k] = new_hash; //keep the minimum value only
-//		}
-//	}
-//	return signature;
-//}
+inline unsigned APHash(const vector<unsigned>::const_iterator& aV_begin,const vector<unsigned>::const_iterator& aV_end){
+	unsigned int hash = 0xAAAAAAAA;
+	size_t i=0;
+	//for (;aV_begin!=aV_end;aV_begin++) {
+	for (auto it = aV_begin; it !=aV_end;it++) {
+		hash ^= ((i & 1) == 0) ? ((hash << 7) ^ *it * (hash >> 3)) : (~(((hash << 11) + *it) ^ (hash >> 5)));
+		i++;
+	}
+	return hash;
+
+}
+
+
+inline unsigned APHash(const vector<unsigned>& aV) {
+	unsigned int hash = 0xAAAAAAAA;
+	for (std::size_t i = 0; i < aV.size(); i++) {
+		hash ^= ((i & 1) == 0) ? ((hash << 7) ^ aV[i] * (hash >> 3)) : (~(((hash << 11) + aV[i]) ^ (hash >> 5)));
+	}
+	return hash;
+}
+inline unsigned HashFunc(const vector<unsigned>& aList, unsigned aBitMask) {
+	return APHash(aList) & aBitMask;
+}
+
+//unsigned HashFunc(vector<unsigned>::iterator aList_begin,vector<unsigned>::iterator aList_end,unsigned aBitMask = 2147483647);
+inline unsigned HashFunc(vector<unsigned>::iterator aList_begin,vector<unsigned>::iterator aList_end,unsigned aBitMask) {
+	return APHash(aList_begin,aList_end) & aBitMask;
+}
 
 //------------------------------------------------------------------------------------------------------------------------
 ///Returns the time between the creation and destruction of an object of TimerClass
@@ -151,9 +162,11 @@ public:
 	~TimerClass() {
 	}
 	void Output();
+	double getElapsed();
 private:
 	std::time_t mStartSec;
 	std::clock_t mStart;
+	std::chrono::time_point<std::chrono::steady_clock> mStart2;
 };
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -168,6 +181,7 @@ public:
 	void Begin();
 	void Count();
 	void Count(int co);
+	double getElapsed();
 	unsigned End();
 private:
 	mutable std::mutex mut;
@@ -179,39 +193,39 @@ private:
 //------------------------------------------------------------------------------------------------------------------------
 ///Implements safe access policies to a vector container and offers
 ///members to compute various statistical estimators.
-class VectorClass {
-	friend ostream& operator<<(ostream& out, const VectorClass& aV);
-public:
-	VectorClass();
-	VectorClass(unsigned aSize);
-	void operator=(const VectorClass& aVector);
-	VectorClass(const VectorClass& aVector);
-	VectorClass(const vector<double>& aVector);
-	VectorClass(const vector<int>& aVector);
-	void Init(unsigned aSize);
-	void Import(const string& aFileName);
-	void Clear();
-	unsigned Size() const;
-	ostream& Output(ostream& out) const;
-	void PushBack(double aValue);
-	double& operator[](unsigned i);
-	double operator[](unsigned i) const;
-	double Prod() const;
-	double Sum() const;
-	double Mean() const;
-	double StandardDeviation() const;
-	double Order(double aOrder) const;
-	double Median() const;
-	double MedianAbsoluteDifference() const;
-	double Min() const;
-	double Max() const;
-	VectorClass RemoveNulls();
-	ostream& OutputStatistics(ostream& out);
-protected:
-	vector<double> mV;
-};
-
-//------------------------------------------------------------------------------------------------------------------------
+//class VectorClass {
+//	friend ostream& operator<<(ostream& out, const VectorClass& aV);
+//public:
+//	VectorClass();
+//	VectorClass(unsigned aSize);
+//	void operator=(const VectorClass& aVector);
+//	VectorClass(const VectorClass& aVector);
+//	VectorClass(const vector<double>& aVector);
+//	VectorClass(const vector<int>& aVector);
+//	void Init(unsigned aSize);
+//	void Import(const string& aFileName);
+//	void Clear();
+//	unsigned Size() const;
+//	ostream& Output(ostream& out) const;
+//	void PushBack(double aValue);
+//	double& operator[](unsigned i);
+//	double operator[](unsigned i) const;
+//	double Prod() const;
+//	double Sum() const;
+//	double Mean() const;
+//	double StandardDeviation() const;
+//	double Order(double aOrder) const;
+//	double Median() const;
+//	double MedianAbsoluteDifference() const;
+//	double Min() const;
+//	double Max() const;
+//	VectorClass RemoveNulls();
+//	ostream& OutputStatistics(ostream& out);
+//protected:
+//	vector<double> mV;
+//};
+//
+////------------------------------------------------------------------------------------------------------------------------
 class OutputManager{
 public:
 	ofstream mOut;
@@ -302,15 +316,17 @@ public:
 	explicit join_threads(vector<thread>& threads_):
 	threads(threads_)
 	{}
+
 	~join_threads()
 	{
+		cout << endl << " join " <<  threads.size() << " threads " << endl;
 		for(unsigned long i=0;i<threads.size();++i)
 		{
 			if(threads[i].joinable())
 				threads[i].join();
-			cout << "thread " << i << " joined " << endl;
+			cout << i << " ";
 		}
-		cout << threads.size() << " threads joined" << endl;
+		cout << endl;
 	}
 };
 

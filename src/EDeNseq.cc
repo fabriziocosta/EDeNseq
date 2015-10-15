@@ -12,6 +12,7 @@
 #include "Parameters.h"
 #include "SeqClusterManager.h"
 #include "SeqClassifyManager.h"
+#include "TestManager.h"
 #include "MinHashEncoder.h"
 
 using namespace std;
@@ -29,6 +30,7 @@ public:
 		mParameters.Init(argc, argv);
 		srand(mParameters.mRandomSeed);
 		mData.Init(&mParameters);
+		omp_set_num_threads(mParameters.mNumThreads);
 	}
 
 	void Exec() {
@@ -38,13 +40,18 @@ public:
 
 		switch (mParameters.mActionCode) {
 		case CLASSIFY:{
-			SeqClassifyManager seq_classify_manager(&mParameters,&mData);
+			SeqClassifyManager seq_classify_manager(&mParameters, &mData);
 			seq_classify_manager.Exec();
 		}
 		break;
 		case CLUSTER:{
 			SeqClusterManager cluster_manager(&mParameters, &mData);
 			cluster_manager.Exec();
+		}
+		break;
+		case TEST:{
+			TestManager test_manager(&mParameters, &mData);
+			test_manager.Exec();
 		}
 		break;
 		default:

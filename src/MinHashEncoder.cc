@@ -1,27 +1,31 @@
 #include "MinHashEncoder.h"
+#include "Utility.h"
 
 MinHashEncoder::~MinHashEncoder(){
 
 }
 
-MinHashEncoder::MinHashEncoder(Parameters* apParameters, Data* apData, INDEXType apIndexType) {
-	Init(apParameters, apData, apIndexType);
+MinHashEncoder::MinHashEncoder(Parameters* apParameters, Data* apData)
+{
+	Init(apParameters, apData);
 }
 
-void MinHashEncoder::Init(Parameters* apParameters, Data* apData, INDEXType apIndexType) {
+void MinHashEncoder::Init(Parameters* apParameters, Data* apData) {
 	mpParameters = apParameters;
 	mpData = apData;
 	numKeys=0;
 	numFullBins=0;
 	mHashBitMask = numeric_limits<unsigned>::max() >> 1;
 	mHashBitMask = (2 << (mpParameters->mHashBitSize - 1)) - 1;
-	indexType = apIndexType;
-
+	cout << "hashbitmask "<< mHashBitMask << endl;
 	if (mpParameters->mNumRepeatsHashFunction == 0 || mpParameters->mNumRepeatsHashFunction > mpParameters->mNumHashShingles * mpParameters->mNumHashFunctions){
 		mpParameters->mNumRepeatsHashFunction = mpParameters->mNumHashShingles * mpParameters->mNumHashFunctions;
 	}
 
-	cout << "MinHashEncoder object created of indexType " << indexType << endl;
+	if (mpParameters->mSeqWindow != 0 && mpParameters->mSeqShift == 0){
+		throw range_error("Please provide seq_shift > 0 if seq_window is > 0!");
+	}
+
 }
 
 inline vector<unsigned> MinHashEncoder::HashFuncNSPDK(const string& aString, unsigned aStart, unsigned aMaxRadius, unsigned aBitMask) {
@@ -37,23 +41,20 @@ inline vector<unsigned> MinHashEncoder::HashFuncNSPDK(const string& aString, uns
 	return code_list;
 }
 
-inline unsigned MinHashEncoder::HashFuncNSPDK(const vector<unsigned>& aList, unsigned aBitMask) {
-	unsigned int hash = 0xAAAAAAAA;
-	for (std::size_t i = 0; i < aList.size(); i++) {
-		hash ^= ((i & 1) == 0) ? ((hash << 7) ^ aList[i] * (hash >> 3)) : (~(((hash << 11) + aList[i]) ^ (hash >> 5)));
-	}
-	return hash & aBitMask;
-}
-
-void MinHashEncoder::generate_feature_vector(const GraphClass& aG, SVector& x) {
+//void MinHashEncoder::generate_feature_vector(const GraphClass& aG, SVector& x) {
+//void MinHashEncoder::generate_feature_vector(const string& seq, SVector& x) {
+inline void  MinHashEncoder::generate_feature_vector(const string& seq, SVector& x) {
+//	x.set_empty_key(0);
+//	x.resize(5000);
+	x.resize(pow(2, mpParameters->mHashBitSize));
 	//assume there is a mMinRadius and a mMinDistance
-	unsigned mRadius = mpParameters->mRadius;
-	unsigned mDistance = mpParameters->mDistance;
-	unsigned mMinRadius = mpParameters->mMinRadius;
-	unsigned mMinDistance = mpParameters->mMinDistance;
+	unsigned& mRadius = mpParameters->mRadius;
+	unsigned& mDistance = mpParameters->mDistance;
+	unsigned& mMinRadius = mpParameters->mMinRadius;
+	unsigned& mMinDistance = mpParameters->mMinDistance;
 
 	//assume 1 vertex with all info on the label
-	string seq = aG.GetVertexLabel(0);
+	//string seq = aG.GetVertexLabel(0);
 	unsigned size = seq.size();
 
 	vector<vector<unsigned> > mFeatureCache;
@@ -70,7 +71,7 @@ void MinHashEncoder::generate_feature_vector(const GraphClass& aG, SVector& x) {
 		endpoint_list[0] = r;
 		for (unsigned d = mMinDistance; d <= mDistance; d++) {
 			endpoint_list[1] = d;
-			SVector z(pow(2, mpParameters->mHashBitSize));
+		//	SVector z(pow(2, mpParameters->mHashBitSize));
 			for (unsigned start = 0; start < size; ++start) {
 				unsigned src_code = mFeatureCache[start][r];
 				unsigned effective_dest = min(start + d, size - 1);
@@ -92,201 +93,315 @@ void MinHashEncoder::generate_feature_vector(const GraphClass& aG, SVector& x) {
 				//				unsigned nosrc_code = HashFunc(endpoint_list, mHashBitMask);
 				//				z.coeffRef(nosrc_code) += 1;
 				x.coeffRef(code) = 1;
+				//x.insert(code);
 			}
-			z /= z.norm();
-			x += z;
+			//z /= z.norm();
+			//x += z;
 		}
 	}
-	x /= x.norm();
+	//x /= x.norm();
 }
 
 void MinHashEncoder::worker_readFiles(int numWorkers){
 
-	int file_instances = 0;
 	while (!done){
 
-		SeqDataSetP myData;
-		unique_lock<mutex> lk(mut1);
-		cv1.wait(lk,[&]{if ( ( (done) ||  ((mInstanceCounter <= mSignatureCounter) && (readFile_queue.try_pop(myData))))) return true; else return false;});
-		lk.unlock();
-		if (file_instances != 0) cout << " instances produced from file " << file_instances << endl;
+		SeqFileP myData;
+		bool succ = readFile_queue.try_pop(myData);
 
-		if (!done && myData->filename != ""){
+		if (!done && succ && myData->filename != ""){
 
-			cout << endl << "read next file " << myData->filename << " index " << myData->idx << " " << " sig_all_counter " << mSignatureCounter << " inst_counter "<< mInstanceCounter << " thread " << std::this_thread::get_id() << endl;
+			cout << endl << "read next file " << myData->filename << " sig_all_counter " << mSignatureCounter << " inst_counter "<< mInstanceCounter  << endl;
 			igzstream fin;
 			fin.open(myData->filename.c_str(),std::ios::in);
 
 			if (!fin)
 				throw range_error("ERROR Data::LoadData: Cannot open file: " + myData->filename);
 
-			bool valid_input = true;
-			file_instances = 0;
+			std::tr1::unordered_map<string, uint8_t> seq_names_seen;
+
+			unsigned pos = 0; // tracks the current seq start pos (window/shift)
+			unsigned end = 0; // tracks the current seq end pos, set from BED entry or to full seq end
+			unsigned idx = 0; // holds the instance id for the inverse index
+
+			bool valid_input = false; // set to false so that we get new seq in while further down directly
 			string currSeq;
-			unsigned pos;
+			string currFullSeq;
+			string currSeqName;
 
-			while (  valid_input ) {
+			std::pair<Data::BEDdataIt,Data::BEDdataIt> annoEntries;
+			Data::BEDdataIt it; // iteratore over all bed entries of current seq
 
-				unsigned maxB = max(100,(int)log2((double)mSignatureCounter)*1);
-				unsigned currBuff = rand()%(maxB*2 - maxB + 1) + maxB;
+			while (!fin.eof()) {
 
-				workQueueS myDataChunk;
-				myDataChunk.gr.resize(currBuff);
-				myDataChunk.names.resize(currBuff);
-				myDataChunk.offset= mInstanceCounter; // offset goes over all files
-				myDataChunk.dataSet = &(*myData);
+				unsigned maxB = max(1000,(int)log2((double)mSignatureCounter)*200);
+				unsigned currBuff = rand()%(maxB*3 - maxB + 1) + maxB; // curr chunk size
+				unsigned i = 0;			// current fragment in currBuff
+				bool lastSeqGr = false; // indicates that we have the last fragment from current seq, used to get all fragments from current seq into current chunk
+				// necessary to have all fragments for one seq/feature if we want to combine signatures in finisher
 
-				unsigned i = 0;
-				while (i < currBuff && !fin.eof() && valid_input) {
+				ChunkP 		myChunkP = std::make_shared<ChunkT>();
 
-					switch (myData->filetype) {
-					case FASTA:
-						mpData->SetGraphFromFASTAFile(fin, myDataChunk.gr.at(i),currSeq, pos, myDataChunk.names.at(i));
-						break;
-					case STRINGSEQ:
-						mpData->SetGraphFromFile(fin, myDataChunk.gr.at(i));
-						break;
-					default:
-						throw range_error("ERROR Data::LoadData: file type not recognized: " + myData->filetype);
-					}
+				while ( ((i<currBuff) && !fin.eof()) || (myData->signatureAction==CLASSIFY && i>=currBuff && lastSeqGr == false) ) {
 
-					if (myDataChunk.gr.at(i).IsEmpty()) {
+					//cout << "valid? " << valid_input << " name :" << currSeqName << ": pos " << pos << " end " << end <<  endl;
+					if (!valid_input) {
+						if  ( it == annoEntries.second ) {
+							// last seq and all bed entries for it are finished, get next seq from file
+
+							switch (myData->filetype) {
+							case FASTA:
+								mpData->GetNextFastaSeq(fin, currFullSeq, currSeqName);
+								if (fin.eof() )
+									continue;
+								mSequenceCounter++;
+								if (myData->checkUniqueSeqNames && seq_names_seen.count(currSeqName) > 0) {
+									throw range_error("Sequence names are not unique in FASTA file! "+currSeqName);
+								} else if (myData->checkUniqueSeqNames) {
+									seq_names_seen.insert(make_pair(currSeqName,1));
+								}
+								break;
+							case STRINGSEQ:
+								mpData->GetNextStringSeq(fin, currFullSeq);
+								if (fin.eof() )
+									continue;
+								mSequenceCounter++;
+								currSeqName =  std::to_string(mSequenceCounter);
+								break;
+							default:
+								throw range_error("ERROR Data::LoadData: file type not recognized: " + myData->filetype);
+							}
+
+							// log output
+							if (myData->signatureAction==INDEX){
+						//		cout << endl << " next found Seq #" <<  seq_names_seen.size() << " length " << currFullSeq.size() << ":" << currSeqName << ": " << endl;
+							}
+
+							// if we have bed entries for a seq, find them and set iterator to first bed entry
+							if (myData->dataBED && myData->dataBED->find(currSeqName) != myData->dataBED->end()){
+								annoEntries = myData->dataBED->equal_range(currSeqName);
+								it = annoEntries.first;
+							} else if (myData->dataBED){
+							//	cout << "no bed entry found! "<< seq_names_seen.size()<< endl;
+								// bed is present, but no entry for current seq found -> we take next seq
+								valid_input = false;
+								continue;
+							}
+						} // if no bed entries left for current seq get new seq
+
+						// check if we use the same idx-group for the whole seq, either by seq name or feature id from BED
+						// idx also defines the value under which we insert features into the index
+						switch (myData->groupGraphsBy){
+						// use seq name as value for inverse index
+						case SEQ_NAME:
+							if (mFeature2IndexValue.find(currSeqName) != mFeature2IndexValue.end()){
+								idx = mFeature2IndexValue[currSeqName];
+							} else {
+								myData->lastMetaIdx++;
+								idx=myData->lastMetaIdx;
+								mFeature2IndexValue.insert(make_pair(currSeqName,idx));
+							}
+							break;
+							// use given value/name in BED file col4 as  value for inverse index
+						case SEQ_FEATURE:
+							if (mFeature2IndexValue.find(it->second->NAME) != mFeature2IndexValue.end()){
+								idx = mFeature2IndexValue[it->second->NAME];
+							} else {
+								myData->lastMetaIdx++;
+								idx=myData->lastMetaIdx;
+								mFeature2IndexValue.insert(make_pair(it->second->NAME,idx));
+							}
+							break;
+						default:
+							break;
+						}
+
+						// only true if we have a found a BED entry for current seq
+						// set region according to BED entry
+						if ( it != annoEntries.second ) {
+							pos = it->second->START;
+							end = it->second->END;
+							//mIndexValue2Feature.insert(make_pair(idx,it->second));
+							//cout << endl << "BED entry found for seq name " << currSeqName << " " << it->second->NAME << " MetaIdx "<< idx << " " << pos << "-"<< end << endl;
+							it++;
+						} else {
+							// no bed is present, then we set start/end to full seq, eg. in case for clustering
+							pos=0;
+							end=currFullSeq.size();
+							//cout << "no BED data present! "<< currSeqName << " " << pos << "-" << end << endl;
+						}
+
+						// check if start/end is within bounds of found seq
+						if (pos>currSeq.size() || end > currFullSeq.size())
+							throw range_error(" BED entry start/end is outside current seq ");
+
+						// apply current seq start/end
+						currSeq = currFullSeq.substr(pos,end-pos);
+
+					} // valid_input?
+
+					// new instance for this chunk
+					InstanceT	myInstance;
+					mpData->GetNextWinFromSeq(currSeq, pos, lastSeqGr,myInstance.seq);
+
+					if (myInstance.seq.size() == 0 && !lastSeqGr) {
 						valid_input = false;
 					} else {
-						mInstanceCounter++;
-						file_instances++;
-						if (myDataChunk.names.at(i) == "") {
-							myDataChunk.names.at(i) = std::to_string(mInstanceCounter);
-						}
-						i++;
-					}
-				}
-				myDataChunk.gr.resize(i);
-				myDataChunk.names.resize(i);
+						// fill current Instance with all data
+						// make graph from seq
 
-				//cout << " instances read " << mInstanceCounter << " " << myDataChunk.gr.size() << " buffer " << currBuff << " full..." << graph_queue.size() << " " << std::this_thread::get_id() << endl;
-				if (graph_queue.size()>=numWorkers*100){
+						valid_input = true;
+
+						switch (myData->groupGraphsBy){
+						case NONE:
+						case SEQ_WINDOW:
+							idx = mInstanceCounter;
+							break;
+						default:
+							break;
+						}
+
+						if (myData->strandType != REV){
+							//mpData->SetGraphFromSeq(myInstance.seq,myInstance.gr);
+
+							myInstance.seqFile = myData;
+							myInstance.name = currSeqName;
+							myInstance.idx = idx;
+							myInstance.pos = pos;
+							myInstance.rc = false;
+
+							myChunkP->push_back(myInstance);
+							i++;
+							mInstanceCounter++;
+						}
+
+						if (myData->strandType != FWD){
+							InstanceT	myInstanceRC;
+							myInstanceRC.seqFile = myData;
+							myInstanceRC.name = currSeqName;
+							myInstanceRC.idx = idx;
+							myInstanceRC.pos = pos;
+							myInstanceRC.rc = true;
+							mpData->GetRevComplSeq(myInstance.seq,myInstanceRC.seq);
+							//mpData->SetGraphFromSeq(myInstanceRC.seq,myInstanceRC.gr);
+
+							myChunkP->push_back(myInstanceRC);
+							mInstanceCounter++;
+							i++;
+						}
+
+					}
+					//cout << "Gr: " << myChunkP->size() << " "<< i << " " << currBuff<< " "<< pos << " " << currSeqName<<  " " << currSeq.size() << " " << lastSeqGr << endl;
+				} // while buffer not full or eof
+
+				//cout << "Gr: " << myChunkP->size() << " "<< i << " " << currBuff<< " "<< pos << " " << currSeqName<<  " " << currSeq.size() << " " << lastSeqGr << endl;
+				if (i==0)
+					continue;
+
+				graph_queue.push(myChunkP);
+
+				//log output
+				//if (mInstanceCounter%1000000 <=currBuff){
+				//	cout << endl << "seqs read " << file_seqs << " instances read " << mInstanceCounter << " " << myChunkP->size() << " buffer " << currBuff << " full..." << graph_queue.size() << " " << currSeq.size()<< " "<< currSeqName << endl;
+				//}
+
+				cv2.notify_all();
+				if (graph_queue.size()>=numWorkers*10){
 					unique_lock<mutex> lk(mut2);
-					cv2.wait(lk,[&]{if ((done) || (graph_queue.size()<=numWorkers*20)) return true; else return false;});
+					cv2.wait(lk,[&]{if ((done) || (graph_queue.size()<=numWorkers*3)) return true; else return false;});
 					lk.unlock();
 				}
-
-				graph_queue.push(std::make_shared<workQueueS> (myDataChunk));
 				cv2.notify_all();
-			}
+			} // while eof
 			fin.close();
 			files_done++;
-			myData->numSequences = file_instances;
-			cvm.notify_all();
+			//cout << endl << "file " << files_done << " seqs " << file_seqs << " " << mInstanceCounter << " " << mSignatureCounter << " instances produced from file " << file_instances << endl;
 		}
 	}
 }
 
-void MinHashEncoder::worker_Graph2Signature(){
+void MinHashEncoder::worker_Graph2Signature(int numWorkers){
 
 	while (!done){
 
-		workQueueT myData;
+		ChunkP myData;
 		unique_lock<mutex> lk(mut2);
 		cv2.wait(lk,[&]{if ( (done) ||  (graph_queue.try_pop( (myData) )) ) return true; else return false;});
 		lk.unlock();
 
-		if (!done && myData->gr.size()>0) {
-			cv2.notify_all();
-			myData->sigs.resize(myData->gr.size());
+		if (!done && myData->size()>0) {
+			//cout << "  graph2sig thread got chunk " << myData->size() << " offset " << myData->offset << " " << mpParameters->mHashBitSize << endl;
 
-			//cout << "  graph2sig thread got chunk " << myData->gr.size() << " offset " << myData->offset << " idx " << myData->dataSet->idx <<  " " << mpParameters->mHashBitSize << endl;
+			for (unsigned j = 0; j < myData->size(); j++) {
 
-			for (unsigned j = 0; j < myData->gr.size(); j++) {
-				SVector x(pow(2, mpParameters->mHashBitSize));
-				generate_feature_vector(myData->gr[j], x);
-				myData->sigs[j] = ComputeHashSignature(x);
+				generate_feature_vector((*myData)[j].seq, (*myData)[j].svec);
+				ComputeHashSignature((*myData)[j].svec,(*myData)[j].sig);
+			}
+			sig_queue.push(myData);
+			if (sig_queue.size()>=numWorkers*50){
+				unique_lock<mutex> lk(mut2);
+				cv2.wait(lk,[&]{if ((done) || (sig_queue.size()<=numWorkers*3)) return true; else return false;});
+				lk.unlock();
 			}
 
-			sig_queue.push(myData);
-			cv2.notify_all();
-			cv3.notify_all();
 		}
+		cv2.notify_all();
+		cv3.notify_all();
 	}
 }
 
-void MinHashEncoder::finisher(vector<vector<unsigned> >* myCache){
+void MinHashEncoder::finisher(){
 	ProgressBar progress_bar(1000);
 	while (!done){
 
-		workQueueT myData;
+		ChunkP myData;
 		unique_lock<mutex> lk(mut3);
 		cv3.wait(lk,[&]{if ( (done) || (sig_queue.try_pop( (myData) ))) return true; else return false;});
 		lk.unlock();
-		if (!done && myData->sigs.size()>0) {
-			if (myData->dataSet->updateIndex){
 
-				switch (indexType) {
-				case CLUSTER:
-					for (unsigned j = 0; j < myData->sigs.size(); j++) {
-						UpdateInverseIndex(myData->sigs[j], myData->offset+j);
-					}
-					break;
-				case CLASSIFY:
-					for (unsigned j = 0; j < myData->sigs.size(); j++) {
-						UpdateInverseIndex(myData->sigs[j], myData->dataSet->idx);
-					}
-					break;
-				default:
-					throw range_error("Cannot update index! Index Type not recognized.");
-				}
-			}
+		if (!done && myData->size()>0) {
 
-			uint chunkSize = myData->sigs.size();
-			if (myData->dataSet->updateSigCache){
-				if (myCache->size()<myData->offset + chunkSize) {
-					myCache->resize(myData->offset + chunkSize);
-					idx2nameMap.resize(myData->offset + chunkSize);
-				}
-				for (unsigned j = 0; j < chunkSize; j++) {
-					myCache->at(myData->offset+j) = myData->sigs[j];
-					name2idxMap.insert(make_pair(myData->names[j],myData->offset+j));
-					idx2nameMap.at(myData->offset+j) = myData->names[j];
-				}
-			}
+			uint chunkSize = myData->size();
+
+			// virtual function call that can be overloaded in child classes to do specific stuff
+			finishUpdate(myData);
+			myData.reset();
 			mSignatureCounter += chunkSize;
-			//cout << "    finisher updated index with " << chunkSize << " signatures all_sigs=" <<  mSignatureCounter << " inst=" << mInstanceCounter << endl;
+
+		//	if (mInstanceCounter%10 <= 1) {
+				cout.setf(ios::fixed); //,ios::floatfield);
+				cout << "\r" <<  std::setprecision(1) << progress_bar.getElapsed()/1000 << " sec elapsed    Finised numSeqs=" << std::setprecision(0) << setw(10);
+				cout << mSequenceCounter  << "("<<mSequenceCounter/(progress_bar.getElapsed()/1000) <<" seq/s)  signatures=" << setw(10);
+				cout << mSignatureCounter << "("<<(double)mSignatureCounter/((progress_bar.getElapsed()/1000)) <<" sig/s - inst=";
+				cout << mInstanceCounter << " graphQueue=" << graph_queue.size() << " sigQueue=" << sig_queue.size() << "      ";
+		//	}
+			//if (mInstanceCounter%1000000 <= chunkSize){
+			//	cout << endl << "    finisher updated index with " << chunkSize << " signatures all_sigs=" <<  mSignatureCounter << " inst=" << mInstanceCounter << " sigQueue=" << sig_queue.size() << endl;
+			//}
+
+//			progress_bar.Count(mInstanceCounter);
 		}
-		progress_bar.Count(mSignatureCounter);
 		cv1.notify_all();
 		cv2.notify_all();
 		cvm.notify_all();
 	}
 }
 
-void MinHashEncoder::LoadDataIntoIndexThreaded(vector<SeqDataSet>& myFiles, vector<vector<unsigned> >* myCache){
+void MinHashEncoder::LoadData_Threaded(SeqFilesT& myFiles){
 
-
-	uint numIndexUpdates = 0;
 	for (unsigned i=0;i<myFiles.size(); i++){
-		readFile_queue.push(std::make_shared<SeqDataSet>(myFiles[i]));
-		if (myFiles[i].updateIndex)
-			numIndexUpdates++;
+		readFile_queue.push(myFiles[i]);
 	}
-
-	// check which cache to use for signatures
-	// use either external MinHash cache or class member
-	vector<vector<unsigned> >* myMinHashCache;
-	if (myCache != NULL) {
-		myMinHashCache = myCache;
-	} else {
-		// use standard cache
-		myMinHashCache = &mMinHashCache;
-	}
-	myMinHashCache->clear();
-
+	cout << "Using " << mpParameters->mHashBitSize << " bits to encode features" << endl;
+	cout << "Using " << mpParameters->mRandomSeed << " as random seed" << endl;
 	cout << "Using " << mpParameters->mNumHashFunctions << " hash functions (with factor " << mpParameters->mNumRepeatsHashFunction << " for single minhash)" << endl;
 	cout << "Using " << mpParameters->mNumHashShingles << " as hash shingle factor" << endl;
+	cout << "Using " << mpParameters->mPureApproximateSim << " as approximate similarity " << endl;
 	cout << "Using feature radius   " << mpParameters->mMinRadius<<".."<<mpParameters->mRadius << endl;
 	cout << "Using feature distance " << mpParameters->mMinDistance<<".."<<mpParameters->mDistance << endl;
-	cout << "Using sequence window  " << mpParameters->mSeqWindow<<" shift"<<mpParameters->mSeqShift << endl;
+	cout << "Using sequence window  " << mpParameters->mSeqWindow<<" shift "<<mpParameters->mSeqShift << " ("<< (unsigned)std::max((double)1,(double)mpParameters->mSeqWindow*mpParameters->mSeqShift) << ") clip " << mpParameters->mSeqClip << endl;
+
 	cout << "Computing MinHash signatures on the fly while reading " << myFiles.size() << " file(s)..." << endl;
-	cout << "Update inverse index with " << numIndexUpdates << " file(s)..." << endl;
 
 	// threaded producer-consumer model for signature creation and index update
 	// created threads:
@@ -304,11 +419,12 @@ void MinHashEncoder::LoadDataIntoIndexThreaded(vector<SeqDataSet>& myFiles, vect
 	files_done=0;
 	mSignatureCounter = 0;
 	mInstanceCounter = 0;
+	mSequenceCounter = 0;
 
-	threads.clear();
-	threads.push_back( std::thread(&MinHashEncoder::finisher,this,myMinHashCache));
+	vector<std::thread> threads;
+	threads.push_back( std::thread(&MinHashEncoder::finisher,this));
 	for (int i=0;i<graphWorkers;i++){
-		threads.push_back( std::thread(&MinHashEncoder::worker_Graph2Signature,this));
+		threads.push_back( std::thread(&MinHashEncoder::worker_Graph2Signature,this,graphWorkers));
 	}
 	threads.push_back( std::thread(&MinHashEncoder::worker_readFiles,this,graphWorkers));
 
@@ -318,7 +434,7 @@ void MinHashEncoder::LoadDataIntoIndexThreaded(vector<SeqDataSet>& myFiles, vect
 		unique_lock<mutex> lk(mutm);
 		cv1.notify_all();
 		while(!done){
-			cvm.wait(lk,[&]{if ( (files_done<(int)myFiles.size()) || (mSignatureCounter < mInstanceCounter)) return false; else return true;});
+			cvm.wait(lk,[&]{if ( (files_done<myFiles.size()) || (mSignatureCounter < mInstanceCounter)) return false; else return true;});
 			lk.unlock();
 			done=true;
 			cv3.notify_all();
@@ -326,37 +442,42 @@ void MinHashEncoder::LoadDataIntoIndexThreaded(vector<SeqDataSet>& myFiles, vect
 			cv1.notify_all();
 		}
 
-	} // leave block only if threads are finished and joined, destroys joiner
+	} // by leaving this block threads get joined by destruction of joiner
 
 	// threads finished
-
-	if (numIndexUpdates>0)
+	if (numKeys>0)
 		cout << endl << "Inverse index ratio of overfull bins (maxSizeBin): " << ((double)numFullBins)/((double)numKeys) << " "<< numFullBins << "/" << numKeys << " instances " << mInstanceCounter << endl;
 
 	if (mInstanceCounter == 0) {
 		throw range_error("ERROR in MinHashEncoder::LoadData: something went wrong; no instances/signatures produced");
 	} else
 		cout << "Instances/signatures produced " << mInstanceCounter << endl;
-
-	mpData->SetDataSize(mInstanceCounter);
 }
 
-vector<unsigned>& MinHashEncoder::ComputeHashSignature(unsigned aID) {
-	if (mMinHashCache.size()>0 && mMinHashCache[aID].size() > 0)
-		return mMinHashCache[aID];
-	else {
-		throw range_error("ERROR internal MinHashCache is not filled!");
-	}
+
+unsigned MinHashEncoder::GetLoadedInstances() {
+	return mInstanceCounter;
 }
 
-vector<unsigned> MinHashEncoder::ComputeHashSignature(SVector& aX) {
+
+void MinHashEncoder::ComputeHashSignature(const SVector& aX, Signature& signature) {
 
 	unsigned numHashFunctionsFull = mpParameters->mNumHashFunctions * mpParameters->mNumHashShingles;
 	unsigned sub_hash_range = numHashFunctionsFull / mpParameters->mNumRepeatsHashFunction;
-	vector<unsigned> signature(numHashFunctionsFull);
+
+	//if we use shingles we need a temp signature of length numHashFunctionsFull
+	// otherwise we directly put values in the provided signature object
+	Signature *signatureP;
+	if (mpParameters->mNumHashShingles>1){
+		signatureP = new Signature(numHashFunctionsFull);
+	} else {
+		signature.resize(numHashFunctionsFull);
+		signatureP = &signature;
+	}
+
 	//init with MAXUNSIGNED
 	for (unsigned k = 0; k < numHashFunctionsFull; ++k)
-		signature[k] = MAXUNSIGNED;
+		(*signatureP)[k] = MAXUNSIGNED;
 
 	//prepare a vector containing the signature as the k min values
 	//for each element of the sparse vector
@@ -364,34 +485,51 @@ vector<unsigned> MinHashEncoder::ComputeHashSignature(SVector& aX) {
 		unsigned feature_id = it.index();
 		//for each sub_hash
 		for (unsigned l = 1; l <= mpParameters->mNumRepeatsHashFunction; ++l) {
-			unsigned key = IntHash(feature_id, MAXUNSIGNED, l);
+			unsigned key = IntHash(feature_id, mHashBitMask, l);
 			for (unsigned kk = 0; kk < sub_hash_range; ++kk) { //for all k values
-				unsigned lower_bound = MAXUNSIGNED / sub_hash_range * kk;
-				unsigned upper_bound = MAXUNSIGNED / sub_hash_range * (kk + 1);
+				unsigned lower_bound = mHashBitMask / sub_hash_range * kk;
+				unsigned upper_bound = mHashBitMask / sub_hash_range * (kk + 1);
 				// upper bound can be different from MAXUNSIGNED due to rounding effects, correct this
-				//if (kk+1==sub_hash_range) upper_bound=MAXUNSIGNED;
+				if (kk+1==sub_hash_range) upper_bound=mHashBitMask;
 				if (key >= lower_bound && key < upper_bound) { //if we are in the k-th slot
 					unsigned signature_feature = kk + (l - 1) * sub_hash_range;
-					if (key < signature[signature_feature]) //keep the min hash within the slot
-						signature[signature_feature] = key;
+					if (key < (*signatureP)[signature_feature]) //keep the min hash within the slot
+						(*signatureP)[signature_feature] = key;
+					//cout << MAXUNSIGNED << " "<< mpParameters->mNumRepeatsHashFunction << " " << sub_hash_range << " " << lower_bound <<" " << upper_bound << " " << signature_feature << " " << l << " " << kk << " " <<  key<< endl;
 				}
 			}
 		}
 	}
 
 	// compute shingles, i.e. rehash mNumHashShingles hash values into one hash value
-	if (mpParameters->mNumHashShingles == 1 ) {
-		return signature;
-	} else {
+	if (mpParameters->mNumHashShingles > 1 ) {
 		vector<unsigned> signatureFinal(mpParameters->mNumHashFunctions);
 		for (unsigned i=0;i<mpParameters->mNumHashFunctions;i++){
-			vector<unsigned> sigShinglet;
-			for (unsigned j=i*mpParameters->mNumHashShingles;j<=i*mpParameters->mNumHashShingles+mpParameters->mNumHashShingles-1; j++){
-				sigShinglet.push_back(signature[j]);
-			}
-			signatureFinal[i] = HashFunc(sigShinglet);
+			signatureFinal[i] = HashFunc(signatureP->begin()+(i*mpParameters->mNumHashShingles),signatureP->begin()+(i*mpParameters->mNumHashShingles+mpParameters->mNumHashShingles),mHashBitMask);
 		}
-		return signatureFinal;
+		signature.swap(signatureFinal);
+		delete signatureP;
+	}
+}
+
+void NeighborhoodIndex::NeighborhoodCacheReset() {
+	cout << "... nearest neighbor cache reset ..." << endl;
+	mNeighborhoodCache.clear();
+	mNeighborhoodCacheExt.clear();
+	mNeighborhoodCacheInfo.clear();
+
+	mNeighborhoodCache.resize(GetLoadedInstances());
+	mNeighborhoodCacheExt.resize(GetLoadedInstances());
+	mNeighborhoodCacheInfo.resize(GetLoadedInstances());
+}
+
+
+vector<unsigned>& NeighborhoodIndex::ComputeHashSignature(unsigned aID) {
+
+	if (mMinHashCache && mMinHashCache->size()>0 && mMinHashCache->at(aID).size() > 0)
+		return mMinHashCache->at(aID);
+	else {
+		throw range_error("ERROR: MinHashCache is not filled!");
 	}
 }
 
@@ -486,6 +624,42 @@ vector<unsigned> NeighborhoodIndex::TrimNeighborhood(umap_uint_int& aNeighborhoo
 	return neighborhood_list;
 }
 
+vector<unsigned> NeighborhoodIndex::ComputeNeighborhood(const unsigned aID, unsigned& collisions, double& density) {
+
+	vector<unsigned> neighborhood_list;
+
+	if (mNeighborhoodCache[aID].size() != 0) {
+		neighborhood_list = mNeighborhoodCache[aID];
+		pair<unsigned, double> tmp = mNeighborhoodCacheInfo[aID];
+		collisions = tmp.first;
+		density = tmp.second;
+	} else {
+		vector<unsigned> signature = ComputeHashSignature(aID);
+		vector<unsigned> neighborhood_list = ComputeApproximateNeighborhood(signature, collisions, density);
+		mNeighborhoodCacheInfo[aID] = make_pair(collisions,density);
+		mNeighborhoodCache[aID] = neighborhood_list;
+	}
+	return neighborhood_list;
+}
+
+umap_uint_int NeighborhoodIndex::ComputeNeighborhoodExt(unsigned aID, unsigned& collisions, double& density) {
+	//cache neighborhoods (if opted for)
+	umap_uint_int neighborhood_list;
+	if (mNeighborhoodCacheExt[aID].size() != 0) {
+		neighborhood_list = mNeighborhoodCacheExt[aID];
+		pair<unsigned, double> tmp = mNeighborhoodCacheInfo[aID];
+		collisions = tmp.first;
+		density = tmp.second;
+	} else {
+		vector<unsigned> signature = ComputeHashSignature(aID);
+		umap_uint_int neighborhood_list = ComputeApproximateNeighborhoodExt(signature, collisions, density);
+		mNeighborhoodCacheExt[aID] = neighborhood_list;
+		mNeighborhoodCacheInfo[aID] = make_pair(collisions,density);
+	}
+	return neighborhood_list;
+}
+
+
 double NeighborhoodIndex::ComputeApproximateSim(const unsigned& aID, const unsigned& bID) {
 
 	vector<unsigned> signatureA = ComputeHashSignature(aID);
@@ -519,74 +693,112 @@ pair<unsigned,unsigned> NeighborhoodIndex::ComputeApproximateSim(const unsigned&
 	return tmp;
 }
 
-void HistogramIndex::SetHistogramSize(unsigned size){
+void HistogramIndex::SetHistogramSize(binKeyTy size){
 	mHistogramSize = size;
 }
 
 
-unsigned HistogramIndex::GetHistogramSize(){
+HistogramIndex::binKeyTy HistogramIndex::GetHistogramSize(){
 	return mHistogramSize;
 }
 
+//void HistogramIndex::UpdateInverseIndex(const vector<unsigned>& aSignature,const unsigned& aIndex) {
+//	const binKeyTy aIndexT =(binKeyTy)aIndex;
+//	for (unsigned k = 0; k < mpParameters->mNumHashFunctions; ++k) { //for every hash value
+//		unsigned key = aSignature[k];
+//		if (key != MAXUNSIGNED && key != 0) { //if key is equal to markers for empty bins then skip insertion instance in data structure
+//			if (mInverseIndex[k].count(key) == 0) { //if this is the first time that an instance exhibits that specific value for that hash function, then store for the first time the reference to that instance
+//				indexBinTy tmp;
+//				tmp.push_back(aIndex);
+//				mInverseIndex[k].insert(make_pair(key, tmp));
+//				numKeys++; // just for bin statistics
+//			} else if (mInverseIndex[k][key].back() != aIndexT) {
+//				// add key to bin if we not have a full bin
+//				indexBinTy& myValue = mInverseIndex[k][key];
+//				indexBinTy::iterator it = myValue.begin();
+//				while (*it<aIndex && it !=myValue.end() ){
+//					++it;
+//				}
+//				mInverseIndex[k][key].insert(it,aIndexT);
+//			}
+//		}
+//	}
+//}
 
-bool compare(const SeqDataSet& first, const SeqDataSet& second) {
-
-	return (first.uIdx<second.uIdx);
-}
-
-void  HistogramIndex::PrepareIndexDataSets(vector<SeqDataSet>& myFileList){
-
-	if (!myFileList.size())
-		throw range_error("ERROR no datasets to prepare ...");
-
-	sort(myFileList.begin(),myFileList.end(),compare);
-
-	// check if we have datasets to update the index
-	uint bin = 0;
-	uint userIdx = myFileList[0].uIdx;
-	for (unsigned i=0;i<myFileList.size(); i++){
-		if (myFileList[i].updateIndex){
-			if ( myFileList[i].uIdx != userIdx )
-				bin++;
-			mHistBin2DatasetIdx.insert(make_pair(bin,i));
-			userIdx = myFileList[i].uIdx;
-			myFileList[i].idx = bin;
-			mIndexDataSets.push_back(myFileList[i]);
-			//cout << "bin" << bin << " " << userIdx << " "<<myFileList[i].idx << " " << myFileList[i].uIdx << endl;
-		}
-	}
-	SetHistogramSize(bin+1);
-}
-
-void HistogramIndex::UpdateInverseIndex(vector<unsigned>& aSignature, unsigned aIndex) {
+void HistogramIndex::UpdateInverseIndex(const vector<unsigned>& aSignature, const unsigned& aIndex) {
+	const binKeyTy& aIndexT =(binKeyTy)aIndex;
 	for (unsigned k = 0; k < mpParameters->mNumHashFunctions; ++k) { //for every hash value
-		unsigned key = aSignature[k];
+		const unsigned& key = aSignature[k];
 		if (key != MAXUNSIGNED && key != 0) { //if key is equal to markers for empty bins then skip insertion instance in data structure
-			if (mInverseIndex[k].count(key) == 0) { //if this is the first time that an instance exhibits that specific value for that hash function, then store for the first time the reference to that instance
+			if (!mInverseIndex[k][key]) { //if this is the first time that an instance exhibits that specific value for that hash function, then store for the first time the reference to that instance
 
 				binKeyTy * foo;
 				foo = new binKeyTy[2];
-				foo[1]= (binKeyTy)aIndex;
+				foo[1]= aIndexT;
 				foo[0]= 1; //index of last element is stored at idx[0]
 
 				mInverseIndex[k][key] = foo;
 				numKeys++; // just for bin statistics
-			} else if (mInverseIndex[k][key][mInverseIndex[k][key][0]] != (binKeyTy)aIndex){
+			} else if (mInverseIndex[k][key][mInverseIndex[k][key][0]] != aIndexT){
+				//mInverseIndex[k][key][0] < 2 &&
+				binKeyTy*& myValue = mInverseIndex[k][key];
 
-				binKeyTy newSize = (mInverseIndex[k][key][0])+1;
-				binKeyTy * fooNew;
-				fooNew = new binKeyTy[newSize+1];
+				// find pos for insert, assume sorted array
+				binKeyTy i = myValue[0];
+				while ((myValue[i]> aIndexT) && (i>1)){
+					i--;
+				}
 
-				memcpy(fooNew,mInverseIndex[k][key],newSize*sizeof(binKeyTy));
-				fooNew[0] = newSize;
-				fooNew[newSize] = (binKeyTy)aIndex;
+				// only insert if element is not there
+				if (myValue[i]<aIndexT){
+					binKeyTy newSize = (myValue[0])+1;
+					binKeyTy * fooNew;
+					fooNew = new binKeyTy[newSize+1];
 
-				delete[] mInverseIndex[k][key];
-				mInverseIndex[k][key] = fooNew;
+					memcpy(fooNew,myValue,(i+1)*sizeof(binKeyTy));
+					fooNew[i+1] = aIndexT;
+					memcpy(&fooNew[i+2],&myValue[i+1],(myValue[0]-i)*sizeof(binKeyTy));
+					fooNew[0] = newSize;
+
+					delete[] myValue;
+					myValue = fooNew;
+				}
+				//				cout << "bin " << key << " k " <<  k << " aIdx "<< aIndex << "\t";
+				//				for (unsigned j=0; j<=mInverseIndex[k][key][0];j++){
+				//					cout << mInverseIndex[k][key][j] <<"\t";
+				//				}
+				//				cout << endl;
+
 			}
 		}
 	}
 }
+
+
+//void HistogramIndex::ComputeHistogram(const vector<unsigned>& aSignature, std::valarray<double>& hist, unsigned& emptyBins) {
+//
+//	hist.resize(GetHistogramSize());
+//	hist *= 0;
+//	emptyBins = 0;
+//	for (unsigned k = 0; k < aSignature.size(); ++k) {
+//
+//		if (mInverseIndex[k].count(aSignature[k]) != 0) {
+//
+//			indexBinTy& myValue = mInverseIndex[k][aSignature[k]];
+//
+//			std::valarray<double> t(0.0, hist.size());
+//
+//			for (uint i=1;i<=myValue.size();i++){
+//				t[myValue[i]-1]=1;
+//			}
+//
+//			hist += t;
+//
+//		} else {
+//			emptyBins++;
+//		}
+//	}
+//}
 
 
 void HistogramIndex::ComputeHistogram(const vector<unsigned>& aSignature, std::valarray<double>& hist, unsigned& emptyBins) {
@@ -594,14 +806,15 @@ void HistogramIndex::ComputeHistogram(const vector<unsigned>& aSignature, std::v
 	hist.resize(GetHistogramSize());
 	hist *= 0;
 	emptyBins = 0;
-
 	for (unsigned k = 0; k < aSignature.size(); ++k) {
-		if (mInverseIndex[k].count(aSignature[k]) > 0) {
+		if (mInverseIndex[k][aSignature[k]]) {
 
 			std::valarray<double> t(0.0, hist.size());
 
-			for (uint i=1;i<=mInverseIndex[k][aSignature[k]][0];i++){
-				t[mInverseIndex[k][aSignature[k]][i]]=1;
+			indexBinTy& myValue = mInverseIndex[k][aSignature[k]];
+
+			for (uint i=1;i<=myValue[0];i++){
+				t[myValue[i]-1]=1;
 			}
 
 			hist += t;
@@ -624,7 +837,22 @@ void HistogramIndex::writeBinaryIndex2(ostream &out, const indexTy& index) {
 	out.write((const char*) &mpParameters->mNumHashShingles, sizeof(unsigned));
 	out.write((const char*) &mpParameters->mNumRepeatsHashFunction, sizeof(unsigned));
 	out.write((const char*) &mpParameters->mSeqWindow, sizeof(unsigned));
-	out.write(reinterpret_cast<char *>(&mpParameters->mSeqShift), sizeof(mpParameters->mSeqShift));
+	out.write(reinterpret_cast<char *>(&mpParameters->mIndexSeqShift), sizeof(mpParameters->mIndexSeqShift));
+	unsigned tmp = GetHistogramSize();
+	out.write((const char*) &tmp, sizeof(unsigned));
+
+	if (mFeature2IndexValue.size() != GetHistogramSize()){
+		throw range_error("Ups! Histogramsize is different to mFeature2IndexValue.size()");
+	}
+
+	std::pair<string,uint> highest = *mFeature2IndexValue.rbegin();          // last element
+	std::map<string,uint>::iterator it = mFeature2IndexValue.begin();
+	do {
+		out.write((const char*) &(it->second), sizeof(unsigned));
+		tmp = it->first.size();
+		out.write((const char*) &(tmp), sizeof(unsigned));
+		out.write(const_cast<char*>(it->first.c_str()), it->first.size());
+	} while ( mFeature2IndexValue.value_comp()(*it++, highest) );
 
 	unsigned numHashFunc = index.size();
 	out.write((const char*) &numHashFunc, sizeof(unsigned));
@@ -649,7 +877,7 @@ void HistogramIndex::writeBinaryIndex2(ostream &out, const indexTy& index) {
 bool HistogramIndex::readBinaryIndex2(string filename, indexTy &index){
 	igzstream fin;
 	fin.open(filename.c_str());
-
+	unsigned tmp;
 	fin.read((char*) &mpParameters->mHashBitSize, sizeof(unsigned));
 	fin.read((char*) &mpParameters->mRandomSeed, sizeof(unsigned));
 	fin.read((char*) &mpParameters->mRadius, sizeof(unsigned));
@@ -659,9 +887,22 @@ bool HistogramIndex::readBinaryIndex2(string filename, indexTy &index){
 	fin.read((char*) &mpParameters->mNumHashShingles, sizeof(unsigned));
 	fin.read((char*) &mpParameters->mNumRepeatsHashFunction, sizeof(unsigned));
 	fin.read((char*) &mpParameters->mSeqWindow, sizeof(unsigned));
-	fin.read( reinterpret_cast<char*>( &mpParameters->mSeqShift ), sizeof mpParameters->mSeqShift);
+	fin.read( reinterpret_cast<char*>( &mpParameters->mIndexSeqShift ), sizeof mpParameters->mIndexSeqShift);
+	fin.read((char*) &tmp, sizeof(unsigned));
+	SetHistogramSize(tmp);
 
-	cout << " shift "<< mpParameters->mSeqShift << endl;
+	mFeature2IndexValue.clear();
+	for (unsigned idx=1;idx<=GetHistogramSize();idx++){
+		unsigned hist_idx;
+		unsigned size;
+
+		fin.read((char*) &hist_idx, sizeof(unsigned));
+		fin.read((char*) &size, sizeof(unsigned));
+		string feature;
+		feature.resize(size);
+		fin.read(const_cast<char*>(feature.c_str()), size);
+		mFeature2IndexValue.insert(make_pair(feature,hist_idx));
+	}
 
 	unsigned numHashFunc = 0;
 	fin.read((char*) &numHashFunc, sizeof(unsigned));
@@ -689,9 +930,9 @@ bool HistogramIndex::readBinaryIndex2(string filename, indexTy &index){
 				fin.setstate(std::ios::badbit);
 			if (!fin.good())
 				return false;
-
+	//		indexBinTy tmp = indexBinTy(numBinEntries);
 			indexBinTy tmp = new binKeyTy[numBinEntries+1];
-
+			//cout << "new bin " << binId << " " << numBinEntries << " ";
 			for (unsigned entry = 1; entry <= numBinEntries; entry++ ){
 
 				binKeyTy s;
@@ -701,7 +942,10 @@ bool HistogramIndex::readBinaryIndex2(string filename, indexTy &index){
 				if (!fin.good())
 					return false;
 				tmp[entry] = s;
+				//cout << s << " ";
 			}
+			//cout << endl;
+
 			tmp[0] = numBinEntries;
 			index[hashFunc][binId] = tmp;
 		}
@@ -886,4 +1130,33 @@ bool HistogramIndex::readBinaryIndex2(string filename, indexTy &index){
 //			}
 //		}
 //	}
+//}
+
+//bool compare(const Data::SeqFileT& first, const Data::SeqFileT& second) {
+//
+//	return (first.uIdx<second.uIdx);
+//}
+
+//void  HistogramIndex::PrepareIndexDataSets(vector<SeqDataSet>& myFileList){
+//
+//	if (!myFileList.size())
+//		throw range_error("ERROR no datasets to prepare ...");
+//
+//	sort(myFileList.begin(),myFileList.end(),compare);
+//
+//	// check if we have datasets to update the index
+//	uint bin = 0;
+//	uint userIdx = myFileList[0].uIdx;
+//	for (unsigned i=0;i<myFileList.size(); i++){
+//		if (myFileList[i].updateIndex){
+//			if ( myFileList[i].uIdx != userIdx )
+//				bin++;
+//			mHistBin2DatasetIdx.insert(make_pair(bin,i));
+//			userIdx = myFileList[i].uIdx;
+//			myFileList[i].idx = bin;
+//			mIndexDataSets.push_back(myFileList[i]);
+//			//cout << "bin" << bin << " " << userIdx << " "<<myFileList[i].idx << " " << myFileList[i].uIdx << endl;
+//		}
+//	}
+//	SetHistogramSize(bin+1);
 //}

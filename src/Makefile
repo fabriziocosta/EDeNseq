@@ -23,12 +23,17 @@
 #CHECKLIMITS activates the limit check for graph operations
 
 CXX=g++
-OPTS=-g -O3 -Wno-deprecated -Wno-unused-local-typedefs -DLOSS=1 -std=c++11 -pthread -fopenmp -DUSEMULTITHREAD -DEIGEN_DONT_PARALLELIZE # -DDEBUGON # -DCHECKLIMITS
+OPTS=-g -O3 -Wno-deprecated -Wno-unused-local-typedefs -DLOSS=1 -std=c++11 -pthread -fopenmp -DNDEBUG -DUSEMULTITHREAD -DEIGEN_DONT_PARALLELIZE # -DDEBUGON # -DCHECKLIMITS
 #OPTS=-g -Wno-deprecated -DLOSS=1 -static -DEIGEN_DONT_PARALLELIZE # -DDEBUGON # -DCHECKLIMITS
 #OPTS=-g -Wno-deprecated -DLOSS=1 #-DDEBUGON
 #OPTS=-g -Wno-deprecated -static -pg
-CXXFLAGS=${OPTS} -Wall -I eigen-eigen-3.20 -Isparsehash-2.0.2 # -mtune=native -march=native 
+
+CXXFLAGS=${OPTS} -Wall -I eigen-eigen-3.20 -Isparsehash-2.0.2 # -DNDEBUG # -fprofile-use -fprofile-correction # -fprofile-generate #-mtune=native -march=native
+#CXXFLAGS=${OPTS} -Wall -I eigen-eigen-3.20 -Isparsehash-2.0.2 -fprofile-use -fprofile-correction # -fprofile-generate #-mtune=native -march=native 
+#CXXFLAGS=${OPTS} -Wall -I eigen-eigen-3.20 -Isparsehash-2.0.2 -fprofile-generate #-mtune=native -march=native
+#CXXFLAGS=${OPTS} -Wall -I eigen-eigen-3.20 -Isparsehash-2.0.2 -mtune=native -march=native # -ftree-vectorizer-verbose=1 -fopt-info-vec-missed
 #CXXFLAGS= ${OPTS} 
+
 #LIBS=-lm -lz -Wl,--whole-archive -lpthread -Wl,--no-whole-archive
 #LIBS=-lm -lz -lpthread -Wl,-u,pthread
 LIBS=-lm -lz -lpthread
@@ -48,20 +53,16 @@ objects_mains := $(patsubst %,%.o,$(PROGRAMS))
 EDeNseq : $(objects)
 	${CXX} ${CXXFLAGS} ${OBABEL} $(filter-out $(objects_mains),$(objects)) $@.o ${LIBS} -o $@
 	 
-EDeNseq.o: EDeNseq.cc vectors.h gzstream.h MinHashEncoder.h
+EDeNseq.o: EDeNseq.cc gzstream.h MinHashEncoder.h
 	 ${CXX} ${CXXFLAGS} -c EDeNseq.cc -o EDeNseq.o
 
 SeqClassifyManager.o:SeqClassifyManager.cc SeqClassifyManager.h MinHashEncoder.h
 
 SeqClusterManager.o:SeqClusterManager.h MinHashEncoder.h MinHashEncoder.cc
 
-NearestNeighbor.o:NearestNeighbor.h MinHashEncoder.h BaseManager.cc
+TestManager.o:TestManager.cc TestManager.h MinHashEncoder.h
 
 MinHashEncoder.o:MinHashEncoder.h Data.h
-
-GraphClass.o:GraphClass.h BaseGraphClass.cc 
-
-BaseGraphClass.o:BaseGraphClass.h 
 
 BaseManager.o:BaseManager.h
 
@@ -69,8 +70,6 @@ Data.o:Data.h
 
 Parameters.o:Parameters.h Utility.h
 
-Utility.o:Utility.h vectors.h
-
-vectors.o: vectors.cc vectors.h
+Utility.o:Utility.h
 
 gzstream.o: gzstream.cc gzstream.h

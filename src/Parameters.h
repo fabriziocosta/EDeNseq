@@ -7,14 +7,14 @@
 using namespace std;
 
 const string PROG_VERSION="1.0";
-const string PROG_DATE="21 March 2015";
+const string PROG_DATE="20 July 2015";
 const string PROG_NAME = "EDeNseq (Explicit Decomposition with Neighborhoods for Biological Sequences)";
 const string PROG_CREDIT = "Author: Steffen Heyne & Fabrizio Costa     Email:heyne@ie-freiburg.mpg.de";
 const string CITATIONS = "For the NSPDK graph kernels see Fabrizio Costa, Kurt De Grave, ''Fast Neighborhood Subgraph Pairwise Distance Kernel'', Proceedings of the 27th International Conference on Machine Learning (ICML-2010), Haifa, Israel, 2010..\n";
 
 
 enum ActionType {
-	NULL_ACTION, CLUSTER, CLASSIFY
+	NULL_ACTION, CLUSTER, CLASSIFY, TEST
 };
 
 enum InputFileType {
@@ -86,10 +86,14 @@ public:
 	double mMaxFractionOfDataset;
 
 	// MetaGenome
-	string mIndexDataList;
+	string mIndexBedFile;
+	string mIndexSeqFile;
 	bool mNoIndexCacheFile;
 	unsigned mSeqWindow;
+	double mIndexSeqShift;
 	double mSeqShift;
+
+	unsigned mSeqClip;
 	unsigned mMinRadius;
 	unsigned mMinDistance;
 	string mDenseCenterNamesFile;
